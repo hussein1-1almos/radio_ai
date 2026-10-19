@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+python-multipart
+python-dotenv
+pydantic
+numpy
+scipy
+pillow
+pydicom
+requests
+llama-cpp-python
+wmh_seg
