@@ -155,13 +155,22 @@ def localize_image(img: Image.Image):
     )
     raw = _run_model(img, prompt)
     boxes, state = parse_localization_output(raw)
-    anns = [{
-        "id": f"medmo-{i}", "label": "AI-proposed candidate region; review required",
-        "box": b, "box_format": "xyxy_normalized_0_1", "score": None,
-        "score_calibrated": False, "source_model": MODEL_VERSION,
-        "model_version": MODEL_VERSION, "validated": False,
-        "image_ref": {"coordinate_space": "resized_analysis_image"}
-    } for i, b in enumerate(boxes, 1)]
+    anns = []
+    for i, b in enumerate(boxes, 1):
+        x1, y1, x2, y2 = b
+        # Keep xyxy for rendering/backward compatibility and expose xywh as requested.
+        anns.append({
+            "id": f"medmo-{i}",
+            "label": "AI-proposed candidate region; review required",
+            "x": x1, "y": y1,
+            "width": round(x2 - x1, 6), "height": round(y2 - y1, 6),
+            "coordinate_format": "normalized_xywh_0_1",
+            "box": b, "box_format": "xyxy_normalized_0_1",
+            "score": None, "score_calibrated": False,
+            "source_model": MODEL_VERSION, "model_version": MODEL_VERSION,
+            "validated": False,
+            "image_ref": {"coordinate_space": "resized_analysis_image"}
+        })
     return {"annotations": anns, "status": state, "raw_output": raw}
 
 def analyze(img: Image.Image, arr, meta: dict, site: str = ""):

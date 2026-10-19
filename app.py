@@ -31,7 +31,13 @@ sem, waiting = asyncio.Semaphore(1), 0
 class Annotation(BaseModel):
     id: str
     label: str
-    box: list[float] = Field(description="[x_min,y_min,x_max,y_max], normalized 0-1 on analysed image")
+    # Requested xywh fields are normalized to 0..1. `box` is retained for compatibility.
+    x: float = Field(ge=0, le=1, description="Left edge, normalized 0..1")
+    y: float = Field(ge=0, le=1, description="Top edge, normalized 0..1")
+    width: float = Field(gt=0, le=1, description="Box width, normalized 0..1")
+    height: float = Field(gt=0, le=1, description="Box height, normalized 0..1")
+    coordinate_format: str = "normalized_xywh_0_1"
+    box: list[float] = Field(description="[x_min,y_min,x_max,y_max], normalized 0-1 on analysed image; retained for compatibility")
     box_format: str
     score: float | None = None
     score_calibrated: bool = False
