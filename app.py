@@ -6,7 +6,6 @@ from typing import Any, Literal
 
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")  # before engine: it reads THREADS etc. at import
-import engine  # noqa: E402  (sets thread limits before numpy/onnxruntime load)
 import numpy as np  # noqa: E402
 import pydicom  # noqa: E402
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile  # noqa: E402
