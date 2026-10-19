@@ -3,7 +3,7 @@ import asyncio, io, os, re, secrets, tempfile, time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
-
+import engin
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")  # before engine: it reads THREADS etc. at import
 import numpy as np  # noqa: E402
