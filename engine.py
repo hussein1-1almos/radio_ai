@@ -232,7 +232,8 @@ def analyze(img, arr, meta, site_hint=""):
                     notes += nt
                 except Exception as exc:
                     print(f"detector {n} failed: {exc!r}")
-                    rec.update(status="failed", detail=type(exc).__name__)
+                    rec.update(status="failed", detail=f"missing module '{exc.name}'" if isinstance(exc, ModuleNotFoundError)
+                               else type(exc).__name__)  # full error stays in the server log
     return {"site": site, "modality": mod, "models": models, "dets": dets, "notes": notes}
 
 
