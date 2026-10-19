@@ -1,3 +1,4 @@
+# core (small): HTTP, DICOM, ONNX CPU inference
 fastapi
 uvicorn
 python-multipart
@@ -8,5 +9,9 @@ scipy
 pillow
 pydicom
 requests
-llama-cpp-python
-wmh_seg
+onnxruntime
+# optional specialists - install only what you enable (use the CPU wheel index for torch:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu)
+# torchxrayvision   # chest X-ray
+# wmh_seg           # brain FLAIR white matter lesions
+# llama-cpp-python  # only if LLM=1 (MedGemma narrative text)
