@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Literal
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")  # before engine: it reads THREADS etc. at import
-import engin
+import engine
 
 import numpy as np  # noqa: E402
 import pydicom  # noqa: E402
