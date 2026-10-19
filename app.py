@@ -6,9 +6,8 @@ from pathlib import Path
 
 import numpy as np
 import pydicom
-from scipy import ndimage as ndi
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
@@ -39,9 +38,7 @@ N_CTX = int(os.getenv("N_CTX", "8192"))
 N_THREADS = int(os.getenv("N_THREADS", str(max(1, (os.cpu_count() or 2) - 1))))
 N_BATCH = int(os.getenv("N_BATCH", "256"))
 ALLOWED_MODALITIES = {"CR", "DX", "DR", "CT", "MR", "MRI", "US"}
-WMH_SEG = os.getenv("WMH_SEG", "0") == "1"  # enable the wmh_seg brain-FLAIR specialist
-MIN_LESION_PX = int(os.getenv("MIN_LESION_PX", "4"))
-llm = seg = None
+llm = None
 model_lock = threading.Lock()
 
 
@@ -51,10 +48,9 @@ class Findings(BaseModel):
     limitations: list[str] = Field(default_factory=list)
     needs_additional_images: bool = Field(default=False)
     possible_urgent_finding: bool = Field(default=False)
-    segmentation_run: bool = False  # distinguishes "no lesions found" from "not checked"
-    bounding_box: list[list[float]] = Field(
+    bounding_box: list[float] = Field(
         default_factory=list,
-        description="[ymin, xmin, ymax, xmax] on 0-1000, one per lesion; computed from the segmentation mask, not the LLM."
+        description="Normalized coordinates [ymin, xmin, ymax, xmax] from 0 to 1000 if a focal lesion is found."
     )
 
 
@@ -90,7 +86,7 @@ def to_uint8(arr: np.ndarray) -> np.ndarray:
     return out.astype(np.uint8)
 
 
-def dicom_to_png(raw: bytes) -> tuple[bytes, dict[str, Any], np.ndarray | None]:
+def dicom_to_png(raw: bytes) -> tuple[bytes, dict[str, Any]]:
     try:
         ds = pydicom.dcmread(io.BytesIO(raw), force=False)
     except Exception as exc:
@@ -108,7 +104,6 @@ def dicom_to_png(raw: bytes) -> tuple[bytes, dict[str, Any], np.ndarray | None]:
         raise ValueError("Cannot decode pixels; an additional DICOM codec may be required") from exc
     if pixels.ndim not in (2, 3):
         raise ValueError("Only 2D images are supported")
-    arr = None  # float pixels (modality LUT applied) for the segmenter
     if pixels.ndim == 3:
         if pixels.shape[-1] not in (3, 4):
             raise ValueError("Unsupported color pixel layout")
@@ -122,7 +117,6 @@ def dicom_to_png(raw: bytes) -> tuple[bytes, dict[str, Any], np.ndarray | None]:
             pixels = apply_modality_lut(pixels, ds)
         except Exception:
             pixels = pixels.astype(np.float32)
-        arr = np.asarray(pixels, np.float32)
         try:
             gray = to_uint8(np.asarray(apply_voi_lut(pixels, ds), dtype=np.float32))
         except Exception:
@@ -185,7 +179,7 @@ def dicom_to_png(raw: bytes) -> tuple[bytes, dict[str, Any], np.ndarray | None]:
         "echo_time": safe_get("EchoTime", 0.0),
         "scope": "single instance only"
     }
-    return buf.getvalue(), metadata, arr
+    return buf.getvalue(), metadata
 
 
 REPORT_SCHEMA = {
@@ -196,15 +190,16 @@ REPORT_SCHEMA = {
                          "summary": {"type": "string"},
                          "limitations": {"type": "array", "items": {"type": "string"}},
                          "needs_additional_images": {"type": "boolean"},
-                         "possible_urgent_finding": {"type": "boolean"}},
-                     "required": ["summary", "limitations", "needs_additional_images", "possible_urgent_finding"]},
+                         "possible_urgent_finding": {"type": "boolean"},
+                         "bounding_box": {"type": "array", "items": {"type": "number"}}},
+                     "required": ["summary", "limitations", "needs_additional_images", "possible_urgent_finding", "bounding_box"]},
         "impression": {"type": "array", "items": {"type": "string"}},
         "uncertainty": {"type": "string"}, "review_required": {"type": "boolean"}},
     "required": ["findings", "impression", "uncertainty", "review_required"]}
 
 
 def load_model():
-    global llm, seg
+    global llm
     if not os.path.isfile(MODEL_PATH):
         raise RuntimeError(f"Model file not found: {MODEL_PATH}")
     if not os.path.isfile(MMPROJ_PATH):
@@ -227,64 +222,35 @@ def load_model():
         handler = handler_cls(clip_model_path=MMPROJ_PATH, verbose=False)
     llm = Llama(model_path=MODEL_PATH, chat_handler=handler, n_ctx=N_CTX,
                 n_threads=N_THREADS, n_batch=N_BATCH, n_gpu_layers=0, verbose=False)
-    if WMH_SEG:
-        from wmh_seg import wmh_seg
-        seg = wmh_seg
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     load_model()
     yield
-    global llm, seg
-    llm = seg = None
+    global llm
+    llm = None
 
 
-app = FastAPI(title="MedGemma DICOM Draft-Report API", version="0.3.0",
-              description="MedGemma draft reports with nnU-Net lesion localization.",
+app = FastAPI(title="MedGemma DICOM Draft-Report API", version="0.2.4",
+              description="Local llama-cpp-python integration with bounding box localization.",
               lifespan=lifespan)
 
 
-def boxes_from_mask(m: np.ndarray) -> list[list[float]]:
-    h, w = m.shape
-    lab, n = ndi.label(m)
-    sizes = ndi.sum(m, lab, range(1, n + 1))
-    return [[round(s[0].start / h * 1000, 1), round(s[1].start / w * 1000, 1),
-             round(s[0].stop / h * 1000, 1), round(s[1].stop / w * 1000, 1)]
-            for s, a in zip(ndi.find_objects(lab), sizes) if a >= MIN_LESION_PX]
-
-
-def segment(arr: np.ndarray, metadata: dict[str, Any], site: str = "") -> list[list[float]] | None:
-    """WMH specialist: brain FLAIR only. None = not applicable / not run."""
-    if seg is None or "FLAIR" not in str(metadata["series_description"]).upper() \
-            or site.lower() not in ("", "brain", "head"):
-        return None
-    with model_lock:
-        out = np.asarray(seg(arr))
-    if out.shape != arr.shape:
-        raise ValueError(f"Segmenter returned shape {out.shape}, expected {arr.shape}")
-    return boxes_from_mask(out > 0.5)
-
-
-# DICOM modality -> specialist(arr, metadata, site) -> boxes | None. Add detectors here; unlisted modalities get no boxes.
-SPECIALISTS = {"MR": segment, "MRI": segment}
-
-
-def infer_sync(png: bytes, metadata: dict[str, Any], boxes: list[list[float]] | None) -> DraftReport:
+def infer_sync(png: bytes, metadata: dict[str, Any]) -> DraftReport:
     if llm is None:
         raise RuntimeError("Model is not initialized")
-    seg_note = ("No segmentation was run; do not state lesion locations or counts. " if boxes is None else
-                f"An independent segmentation model found {len(boxes)} focal hyperintense region(s) on this slice, "
-                f"boxes [ymin,xmin,ymax,xmax] on 0-1000: {boxes}. Describe only these; do not add other locations. ")
     uri = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
     prompt = (
         "Create a NON-FINAL draft for a qualified radiologist to review. This is one rendered "
         "image, not a complete study. Do not assert normality if evidence is insufficient. "
         "State limitations and uncertainty; do not give treatment recommendations. The possible "
         "urgent finding flag is only a model suggestion, must not be used as an autonomous alert "
-        "or to rule out an emergency. Do not output coordinates. " + seg_note +
+        "or to rule out an emergency. If a specific focal abnormality or lesion is identified, "
+        "provide its bounding box coordinates as [ymin, xmin, ymax, xmax] scaled from 0 to 1000. "
+        "If no focal lesion is present, return an empty array []. "
         "Return JSON with findings.summary, findings.limitations, findings.needs_additional_images, "
-        "findings.possible_urgent_finding, impression array, uncertainty, "
+        "findings.possible_urgent_finding, findings.bounding_box, impression array, uncertainty, "
         "and review_required. review_required must be true."
     )
     messages = [{"role": "user", "content": [
@@ -337,7 +303,7 @@ async def ready():
 
 @app.post("/v1/dicom/draft-report", response_model=DraftReport,
           dependencies=[Depends(require_api_key)])
-async def create_draft_report(file: UploadFile = File(...), site: str = Form("")):
+async def create_draft_report(file: UploadFile = File(...)):
     raw = await file.read(MAX_UPLOAD_BYTES + 1)
     await file.close()
     if len(raw) > MAX_UPLOAD_BYTES:
@@ -345,16 +311,11 @@ async def create_draft_report(file: UploadFile = File(...), site: str = Form("")
     if not raw:
         raise HTTPException(400, "Empty upload")
     try:
-        png, metadata, arr = dicom_to_png(raw)
+        png, metadata = dicom_to_png(raw)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     try:
-        fn = SPECIALISTS.get(metadata["modality"])
-        boxes = await run_in_threadpool(fn, arr, metadata, site) if fn and arr is not None else None
-        report = await run_in_threadpool(infer_sync, png, metadata, boxes)
-        report.findings.segmentation_run = boxes is not None
-        report.findings.bounding_box = boxes or []
-        return report
+        return await run_in_threadpool(infer_sync, png, metadata)
     except ValueError as exc:
         raise HTTPException(502, str(exc)) from exc
     except Exception as exc:
