@@ -9,7 +9,9 @@
       "series_contains": "FLAIR",
       "label": "Possible WMH",
       "validated": false,
-      "detects": "White matter hyperintensities on axial FLAIR only; not other brain lesions."
+      "detects": "White matter hyperintensities on axial FLAIR only; not other brain lesions.",
+      "auto": true,
+      "auto_note": "Body part is not stated in the DICOM header; brain was assumed because the series is FLAIR."
     },
     "chest": {
       "kind": "xrv",

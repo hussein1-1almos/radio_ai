@@ -196,24 +196,36 @@ def coverage():
                  "detects": REG["detectors"][d].get("detects", "")} for d in ds] for s, ds in REG["sites"].items()}
 
 
+def _gate(cfg, meta) -> str:
+    """'' if the detector applies to this image, else the reason it does not."""
+    if meta["modality"] not in cfg.get("modalities", []):
+        return f"does not handle modality {meta['modality']}"
+    if cfg.get("series_contains", "").lower() not in str(meta.get("series_description", "")).lower():
+        return f"series is not {cfg['series_contains']}"
+    return ""
+
+
 def analyze(img, arr, meta, site_hint=""):
     mod = meta["modality"]
     site = resolve_site(site_hint, meta.get("body_part"), meta.get("study_description"), meta.get("series_description"))
     models, dets, notes = [], [], []
     with _run_lock:  # one inference at a time keeps CPU and RAM bounded
-        for n in REG["sites"].get(site, []):
+        # No body part in the header: only detectors marked "auto" whose own gate passes (e.g. FLAIR MR) are tried.
+        names = ([n for n, c in REG["detectors"].items() if c.get("auto") and not _gate(c, meta)]
+                 if site is None else REG["sites"].get(site, []))
+        for n in names:
             cfg = REG["detectors"][n]
             rec = {"name": n, "kind": cfg["kind"], "version": None, "validated": bool(cfg.get("validated", False)),
                    "detects": cfg.get("detects", ""), "status": "ran", "detail": ""}
             models.append(rec)
-            if mod not in cfg.get("modalities", []):
-                rec.update(status="not_applicable", detail=f"does not handle modality {mod}")
-            elif cfg.get("series_contains", "").lower() not in str(meta.get("series_description", "")).lower():
-                rec.update(status="not_applicable", detail=f"series is not {cfg['series_contains']}")
+            if _gate(cfg, meta):
+                rec.update(status="not_applicable", detail=_gate(cfg, meta))
             elif not installed(cfg):
                 rec.update(status="not_installed", detail="package or weights missing")
             else:
                 rec["version"] = version(cfg)
+                if site is None:
+                    notes.append(cfg.get("auto_note", "Body part was not stated in the DICOM header and was assumed."))
                 try:
                     d, nt = _RUN[cfg["kind"]](cfg, _get(n, cfg), img, arr)
                     dets += [{**x, "model": n} for x in d]
@@ -266,7 +278,7 @@ def build_report(r, meta):
         status = "unsupported"
         why = ("the body part could not be determined" if not site else
                f"no detector is configured for '{site}'" if not models else
-               "the configured detector(s) are not installed or do not apply to this image")
+               "no configured detector could run (" + ", ".join(f"{m['name']}: {m['status']}" for m in models) + ")")
         summary = f"{mod} examination: automated abnormality detection was not performed because {why}."
     if failed and status == "localized":
         limits.append("Detector(s) failed and were skipped: " + ", ".join(failed) + ".")
